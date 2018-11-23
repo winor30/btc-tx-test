@@ -3,15 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/hex"
-	"fmt"
-	"github.com/btcsuite/btcd/btcec"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/rpcclient"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/btcsuite/btcutil"
-	"github.com/btcsuite/btcutil/base58"
 	"github.com/joho/godotenv"
 	"log"
 	"os"
@@ -29,6 +26,55 @@ func checkErrorMsg(err error, msg string) {
 		log.Fatalln(msg)
 		os.Exit(1)
 	}
+}
+
+func genMsgTx(txid string, utxoid uint32, receiver string, value int64, privkey string, client *rpcclient.Client) *wire.MsgTx {
+	msgTx := wire.NewMsgTx(wire.TxVersion)
+
+	// Add tx input
+	// prev tx
+	prevtxhash, err := chainhash.NewHashFromStr(txid)
+	checkError(err)
+	op := wire.NewOutPoint(prevtxhash, utxoid)
+	txin := wire.NewTxIn(op, nil, nil)
+	msgTx.AddTxIn(txin)
+
+	// Add tx output
+	// value
+	addr, err := btcutil.DecodeAddress(receiver, &chaincfg.TestNet3Params)
+	checkError(err)
+	// generate locking script consider by address type
+	pkscript, err := txscript.PayToAddrScript(addr)
+	checkError(err)
+	txout := wire.NewTxOut(value, pkscript)
+	msgTx.AddTxOut(txout)
+
+	// generate signature
+	prevtx, err := client.GetRawTransaction(prevtxhash)
+	checkError(err)
+	wif, _ := btcutil.DecodeWIF(privkey)
+	privKey := wif.PrivKey
+	sigScript, err := txscript.SignatureScript(msgTx, 0, prevtx.MsgTx().TxOut[1].PkScript, txscript.SigHashAll, privKey, wif.CompressPubKey)
+	checkError(err)
+	msgTx.TxIn[0].SignatureScript = sigScript
+
+	return msgTx
+}
+
+func validate(msgTx *wire.MsgTx) bool {
+	vm, err := txscript.NewEngine(nil, msgTx, 0, 0, nil, nil, -1)
+	checkError(err)
+	if err := vm.Execute(); err != nil {
+		log.Println(err)
+		return false
+	}
+	return true
+}
+
+func show(msgTx *wire.MsgTx) {
+	buf := new(bytes.Buffer)
+	checkError(msgTx.Serialize(buf))
+	log.Println(hex.EncodeToString(buf.Bytes()))
 }
 
 func main() {
@@ -57,49 +103,30 @@ func main() {
 	}
 	defer client.Shutdown()
 
-	prevtxid := "4eb8629ffb3bdf1035951d6df78fdb0bf5770a1b6b5744995ad593a52b8c2dc3"
-	utxoid := uint32(0)
-	// P2PKH address
-	receiver := "mrm6soHe9svDVh7YzjtSY26PbGXSBp8eDA"
-	privkey := os.Getenv("privkey")
-	const value int64 = 4500000
+	p2pkh := func() {
+		prevtxid := "ee2a68ba404e09ab888a3dabb6143d2ae464c534e3c3855dc2f2b8867bdb452d"
+		utxoid := uint32(1)
+		// P2PKH address
+		receiver := "mrm6soHe9svDVh7YzjtSY26PbGXSBp8eDA"
+		privkey := os.Getenv("privkey")
+		const value int64 = 4500000
 
-	// Generate new tx
-	msgTx := wire.NewMsgTx(wire.TxVersion)
+		// Generate new tx with sign
+		msgTx := genMsgTx(prevtxid, utxoid, receiver, value, privkey, client)
 
-	// Add tx input
-	// prev tx
-	prevtxhash, err := chainhash.NewHashFromStr(prevtxid)
-	checkError(err)
-	op := wire.NewOutPoint(prevtxhash, utxoid)
-	txin := wire.NewTxIn(op, []byte{}, [][]byte{})
-	msgTx.AddTxIn(txin)
+		// show tx
+		// bitcoin-cli decoderawtransaction <result of hex.EncodeToString(buf.Bytes()))>
+		show(msgTx)
 
-	// Add tx output
-	// value
-	addr, err := btcutil.DecodeAddress(receiver, &chaincfg.TestNet3Params)
-	checkError(err)
-	// generate locking script consider by address type
-	pkscript, err := txscript.PayToAddrScript(addr)
-	checkError(err)
-	txout := wire.NewTxOut(value, pkscript)
-	msgTx.AddTxOut(txout)
+		if !validate(msgTx) {
+			log.Println("invalid transaction")
+			return
+		}
 
-	// Generate sign
-	prevtx, err := client.GetRawTransaction(prevtxhash)
-	checkError(err)
-	privKeyBytes := base58.Decode(privkey)
-	privKey, _ := btcec.PrivKeyFromBytes(btcec.S256(), privKeyBytes)
-	lookupKey := func(addres btcutil.Address) (*btcec.PrivateKey, bool, error) {
-		return privKey, true, nil
+		txh, err := client.SendRawTransaction(msgTx, true)
+		checkError(err)
+		log.Println(txh)
 	}
-	sigScript, err := txscript.SignTxOutput(&chaincfg.TestNet3Params, prevtx.MsgTx(), 0, pkscript, txscript.SigHashAll, txscript.KeyClosure(lookupKey), nil, nil)
-	checkError(err)
-	msgTx.TxIn[0].SignatureScript = sigScript
 
-	// show tx
-	// bitcoin-cli decoderawtransaction <result of hex.EncodeToString(buf.Bytes()))>
-	buf := new(bytes.Buffer)
-	checkError(msgTx.Serialize(buf))
-	fmt.Println(hex.EncodeToString(buf.Bytes()))
+	p2pkh()
 }
